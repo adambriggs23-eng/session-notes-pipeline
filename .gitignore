@@ -1,0 +1,44 @@
+# ============================================================
+# Never commit client data. These folders/files should never
+# exist inside this repo, but the patterns below are a safety
+# net in case something gets copied in by mistake.
+# ============================================================
+
+# Client data folders (recordings, transcripts, draft/final notes)
+recordings/
+transcripts/
+notes/
+processed/
+
+# Audio files of any kind
+*.wav
+*.m4a
+*.mp3
+*.aac
+*.ogg
+*.flac
+
+# Generated Word documents (drafts/finished notes) - but NOT the blank template
+*.docx
+!templates/*.docx
+
+# ============================================================
+# Tools, models, and environments (large, machine-specific -
+# these get downloaded/built locally per the setup guide,
+# not stored in the repo)
+# ============================================================
+whisper.cpp/
+venv/
+ffmpeg/
+*.bin
+*.pt
+*.onnx
+
+# ============================================================
+# Standard Python / OS junk
+# ============================================================
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+*.log
