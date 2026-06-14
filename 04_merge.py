@@ -14,19 +14,23 @@ Usage:
         python 04_merge.py session_2026-06-13
 
 Expects:
-    transcripts/<name>.json                 (from 02_transcribe.sh, whisper --output-json-full)
+    transcripts/<name>.json                 (from 02_transcribe.bat, whisper --output-json-full)
     transcripts/<name>_diarization.json     (from 03_diarize.py)
 
 Output:
     transcripts/<name>_speaker_transcript.txt
         A readable transcript like:
 
-        [00:00:03] SPEAKER_00: How have you been since we last spoke?
-        [00:00:08] SPEAKER_01: Honestly, this week has been pretty rough...
+        [00:00:03.00] SPEAKER_00: How have you been since we last spoke?
+        [00:00:08.25] SPEAKER_01: Honestly, this week has been pretty rough...
 
     After running this, open the .txt file and do a quick find/replace to
     rename SPEAKER_00 -> "Clinician" and SPEAKER_01 -> "Client" (or vice
     versa) based on listening to the start of the recording.
+
+    IMPORTANT: Speaker identities (SPEAKER_00 vs SPEAKER_01) are not guaranteed
+    to be consistent across different recordings. Always verify by listening to
+    the first minute of each new recording.
 """
 
 import sys
@@ -39,10 +43,12 @@ TRANSCRIPTS_DIR = PIPELINE_DIR / "transcripts"
 
 
 def fmt_time(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.CS (with centiseconds for precision)."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+    cs = int((seconds % 1) * 100)  # centiseconds
+    return f"{h:02d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def find_speaker(t: float, segments):
@@ -62,33 +68,52 @@ def find_speaker(t: float, segments):
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <name>")
+        print(f"  Example: {sys.argv[0]} session1")
         sys.exit(1)
 
-    name = sys.argv[1]
+    name = Path(sys.argv[1]).stem  # Strip extension if provided
     whisper_json_path = TRANSCRIPTS_DIR / f"{name}.json"
     diarization_path = TRANSCRIPTS_DIR / f"{name}_diarization.json"
     out_path = TRANSCRIPTS_DIR / f"{name}_speaker_transcript.txt"
 
     if not whisper_json_path.exists():
-        print(f"Missing: {whisper_json_path} (run 02_transcribe.sh first)")
+        print(f"Missing: {whisper_json_path} (run 02_transcribe.bat first)")
         sys.exit(1)
     if not diarization_path.exists():
         print(f"Missing: {diarization_path} (run 03_diarize.py first)")
         sys.exit(1)
 
-    with open(whisper_json_path) as f:
-        whisper_data = json.load(f)
-    with open(diarization_path) as f:
-        diarization_segments = json.load(f)
+    # Check for output collision
+    if out_path.exists():
+        print(f"WARNING: Output file already exists: {out_path}")
+        response = input("Overwrite? (y/n): ").strip().lower()
+        if response != "y":
+            print("Cancelled.")
+            sys.exit(0)
+
+    try:
+        with open(whisper_json_path) as f:
+            whisper_data = json.load(f)
+        with open(diarization_path) as f:
+            diarization_segments = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse JSON files: {e}")
+        sys.exit(1)
 
     # whisper.cpp --output-json-full produces a "transcription" list of segments,
     # each with "offsets": {"from": ms, "to": ms} and "text"
     segments = whisper_data.get("transcription", [])
     if not segments:
-        print("No transcription segments found in whisper JSON.")
+        print("ERROR: No transcription segments found in whisper JSON.")
+        print("The audio may have been empty, silent, or too corrupted to transcribe.")
         sys.exit(1)
 
-    lines = []
+    lines = [
+        "# IMPORTANT: Verify speaker identities by listening to the start of the recording.",
+        "# SPEAKER_00 and SPEAKER_01 may be assigned differently in different recordings.",
+        "# After verifying, use Find & Replace (Ctrl+H) to rename them to Clinician/Client.",
+        ""
+    ]
     current_speaker = None
     current_text = []
     current_start = None

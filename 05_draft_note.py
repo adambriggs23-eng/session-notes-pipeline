@@ -39,6 +39,10 @@ Expects:
 
 Output:
     notes\\<name>_DRAFT.docx
+
+Environment variables:
+    OLLAMA_MODEL        - Model to use (default: llama3.1:8b)
+    OLLAMA_TIMEOUT      - Timeout in seconds (default: 1200 = 20 min)
 """
 
 import sys
@@ -58,6 +62,7 @@ NOTES_DIR = PIPELINE_DIR / "notes"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "1200"))  # 20 minutes default
 
 # ------------------------------------------------------------------------------
 # Prompts - one per section. Smaller models do better with focused,
@@ -79,7 +84,7 @@ Respond ONLY with valid JSON, no other text, in exactly this structure:
   "presenting_concerns": "string - what the client identified as their focus for this session, in their words and clinically",
   "client_report": ["bullet point", "bullet point", "..."],
   "clinical_observations": ["bullet point about appearance/behaviour/mood/affect/speech/thought process etc, ONLY based on what is evident from the transcript", "..."],
-  "safety_risk_status": "string - any mention of suicidal ideation, homicidal ideation, self-harm, or safety concerns. If none were mentioned, write: 'No suicidal or homicidal ideation reported or observed in session. No current safety concerns raised.'"
+  "safety_risk_status": "string - any mention of suicidal ideation, homicidal ideation, self-harm, or safety concerns. If none were mentioned, write: 'No suicidal or homicidal ideation reported or observable. No self-harm mentioned.'"
 }}
 
 TRANSCRIPT:
@@ -98,10 +103,10 @@ guessing.
 Respond ONLY with valid JSON, no other text, in exactly this structure:
 
 {{
-  "treatment_goals_addressed": "string - any treatment goals explicitly mentioned in the transcript. If none mentioned, write 'Not explicitly referenced in this session - link to treatment plan goal(s) on review.'",
+  "treatment_goals_addressed": "string - any treatment goals explicitly mentioned in the transcript. If none mentioned, write 'Not explicitly referenced in this session - link to treatment plan goals for context.'",
   "progress_toward_goals": ["bullet point describing any evidence of progress, setbacks, or change mentioned by the client, with supporting detail from the transcript", "..."],
   "client_response_to_interventions": ["bullet point describing how the client engaged with any techniques, suggestions, or exercises discussed", "..."],
-  "clinical_interpretation": "string - a draft interpretation based ONLY on what's observable in the transcript (e.g. engagement level, stated progress/setbacks, compliance with prior homework). Do NOT provide a diagnosis or prognosis - flag these as 'Clinician to assess' since they require professional judgment beyond the transcript."
+  "clinical_interpretation": "string - a draft interpretation based ONLY on what's observable in the transcript (e.g. engagement level, stated progress/setbacks, compliance with prior homework). Do NOT diagnose or predict outcomes. Clinician will add diagnostic/prognostic judgment."
 }}
 
 TRANSCRIPT:
@@ -128,7 +133,7 @@ TRANSCRIPT:
 
 
 def call_ollama(prompt: str) -> dict:
-    """Call local Ollama server and parse JSON response."""
+    """Call local Ollama server and parse JSON response with robust error handling."""
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -142,38 +147,59 @@ def call_ollama(prompt: str) -> dict:
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
+    except urllib.error.URLError as e:
         print(f"\nERROR: could not reach Ollama at {OLLAMA_URL}")
-        print("Is Ollama installed and running? Try opening a new Command")
-        print(f"Prompt window and typing: ollama run {OLLAMA_MODEL}")
+        print("Is Ollama installed and running? Try:")
+        print(f"  ollama run {OLLAMA_MODEL}")
         print(f"\nDetails: {e}")
+        sys.exit(1)
+    except urllib.error.HTTPError as e:
+        print(f"\nERROR: Ollama HTTP error: {e.code} {e.reason}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\nERROR: Unexpected error connecting to Ollama: {e}")
         sys.exit(1)
 
     raw_text = result.get("response", "")
+    
+    # Try parsing as-is first
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
-        # Try to extract a JSON object from the text if the model added extra wording
-        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-        print("\nWARNING: model output was not valid JSON. Raw output was:")
-        print(raw_text[:1000])
-        return {}
+        pass
+    
+    # Try using JSONDecoder.raw_decode() to extract valid JSON object
+    try:
+        decoder = json.JSONDecoder()
+        obj, idx = decoder.raw_decode(raw_text)
+        return obj
+    except json.JSONDecodeError:
+        pass
+    
+    # Last resort: regex extraction
+    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+    
+    print("\nWARNING: model output was not valid JSON. Raw output was:")
+    print(raw_text[:1000])
+    return {}
 
 
 def add_heading(doc, text):
+    """Add a formatted heading to the document."""
     h = doc.add_heading(text, level=2)
     for run in h.runs:
         run.font.color.rgb = RGBColor(0x2E, 0x75, 0xB6)
 
 
 def add_field(doc, label, value, hint=None):
+    """Add a labeled field to the document with optional hint text."""
     p = doc.add_paragraph()
     run = p.add_run(label)
     run.bold = True
@@ -195,9 +221,10 @@ def add_field(doc, label, value, hint=None):
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <name>")
+        print(f"  Example: {sys.argv[0]} session1")
         sys.exit(1)
 
-    name = sys.argv[1]
+    name = Path(sys.argv[1]).stem  # Strip extension if provided
     transcript_path = TRANSCRIPTS_DIR / f"{name}_speaker_transcript.txt"
 
     if not transcript_path.exists():
@@ -205,6 +232,9 @@ def main():
         print("Run the transcription/diarization/merge steps first, and make")
         print("sure you've done the SPEAKER_00/01 -> Clinician/Client rename.")
         sys.exit(1)
+
+    # Create notes directory at start
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
 
     transcript = transcript_path.read_text(encoding="utf-8")
 
@@ -214,7 +244,8 @@ def main():
         print("Continuing anyway...\n")
 
     print(f"Drafting note for: {name}")
-    print(f"Using local model: {OLLAMA_MODEL}\n")
+    print(f"Using local model: {OLLAMA_MODEL}")
+    print(f"Timeout: {OLLAMA_TIMEOUT} seconds\n")
 
     print("[1/3] Drafting Data section...")
     data = call_ollama(DATA_PROMPT.format(transcript=transcript))
@@ -248,7 +279,8 @@ def main():
         "AI-GENERATED DRAFT \u2014 NOT A FINAL CLINICAL NOTE. "
         "Generated offline from session transcript. Review, verify, and "
         "rewrite all sections before filing, especially Safety/Risk and "
-        "Assessment. Verify all quotes against the transcript."
+        "Assessment. Verify all quotes against the transcript. "
+        "This is a starting point, not a substitute for your clinical judgment."
     )
     banner_run.bold = True
     banner_run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
@@ -306,13 +338,16 @@ def main():
     sig_run = sig.add_run("Clinician signature: ___________    Date completed: ___________")
     sig_run.bold = True
 
-    NOTES_DIR.mkdir(parents=True, exist_ok=True)
     out_path = NOTES_DIR / f"{name}_DRAFT.docx"
     doc.save(out_path)
 
     print(f"\nDraft note written to: {out_path}")
-    print("Open it, review every section against the transcript, and rewrite")
-    print("as needed before this becomes a real clinical record.")
+    print("\nREMINDER: Before this becomes a clinical record:")
+    print("  1. Read the entire transcript yourself")
+    print("  2. Rewrite Safety/Risk section based on YOUR assessment")
+    print("  3. Add your clinical judgment to Assessment (diagnosis, prognosis)")
+    print("  4. Verify every quoted statement against the transcript")
+    print("  5. Rewrite in your own clinical voice")
 
 
 if __name__ == "__main__":
